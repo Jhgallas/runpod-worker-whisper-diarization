@@ -9,7 +9,10 @@ Serverless worker for audio transcription with speaker diarization using Whisper
 - Speaker diarization with timestamps
 
 ## Future improvements
-- ...
+- Switch to WhisperX for batched inference (wav2vec2 alignment, faster-whisper etc.)
+- Configurable min_speakers and max_speakers
+- VAC (Voice Activity Detection)
+- Try out more diarization frameworks such as DiariZen
 
 ## Deployment
 
