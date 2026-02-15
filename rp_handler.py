@@ -150,9 +150,6 @@ def handler(event):
         })
     print(f"Transcription done in {time.time()-t0:.1f}s — {len(segments_list)} segments, detected language: {info.language} ({info.language_probability:.0%})")
 
-    # Build transcribe_res format for diarize_text
-    transcribe_res = {"segments": segments_list}
-
     # Run diarization pipeline
     print("Running diarization pipeline...")
     t0 = time.time()
@@ -164,7 +161,7 @@ def handler(event):
 
     # Merge transcription and diarization results
     print("Merging transcription and diarization results...")
-    merged_segments = diarize_text(transcribe_res, speaker_segments)
+    merged_segments = diarize_text(segments_list, speaker_segments)
 
     for segment, speaker, text in merged_segments:
         print(f"{segment.start:.1f} - {segment.end:.1f}: Speaker_{speaker} {text}")
