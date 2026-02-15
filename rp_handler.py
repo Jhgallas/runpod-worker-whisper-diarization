@@ -19,7 +19,7 @@ from pyannote.core import Segment
 def _resolve_runtime():
     if torch.cuda.is_available():
         print("CUDA detected. Using GPU execution.")
-        return "cuda", "large-v2", "float16"
+        return "cuda", "large-v3-turbo", "float16"
     print("No CUDA detected. Using CPU execution.")
     return "cpu", "tiny", "int8"
 
