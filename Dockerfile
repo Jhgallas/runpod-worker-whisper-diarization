@@ -33,7 +33,6 @@ RUN uv pip install --system --no-cache-dir \
     runpod \
     openai-whisper \
     pyannote.audio \
-    git+https://github.com/yinruiqing/pyannote-whisper \
     librosa \
     soundfile
 

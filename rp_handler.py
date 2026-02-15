@@ -9,7 +9,43 @@ import soundfile as sf
 import librosa
 
 from pyannote.audio import Pipeline
-from pyannote_whisper.utils import diarize_text
+from pyannote.core import Segment
+
+
+# Inlined from pyannote-whisper (repo install is broken)
+def diarize_text(transcribe_res, diarization_result):
+    timestamp_texts = []
+    for item in transcribe_res['segments']:
+        timestamp_texts.append((Segment(item['start'], item['end']), item['text']))
+
+    spk_text = []
+    for seg, text in timestamp_texts:
+        spk = diarization_result.crop(seg).argmax()
+        spk_text.append((seg, spk, text))
+
+    PUNC_SENT_END = ['.', '?', '!']
+    merged = []
+    pre_spk = None
+    cache = []
+    for seg, spk, text in spk_text:
+        if spk != pre_spk and pre_spk is not None and len(cache) > 0:
+            sentence = ''.join([c[-1] for c in cache])
+            merged.append((Segment(cache[0][0].start, cache[-1][0].end), cache[0][1], sentence))
+            cache = [(seg, spk, text)]
+            pre_spk = spk
+        elif text and len(text) > 0 and text[-1] in PUNC_SENT_END:
+            cache.append((seg, spk, text))
+            sentence = ''.join([c[-1] for c in cache])
+            merged.append((Segment(cache[0][0].start, cache[-1][0].end), cache[0][1], sentence))
+            cache = []
+            pre_spk = spk
+        else:
+            cache.append((seg, spk, text))
+            pre_spk = spk
+    if len(cache) > 0:
+        sentence = ''.join([c[-1] for c in cache])
+        merged.append((Segment(cache[0][0].start, cache[-1][0].end), cache[0][1], sentence))
+    return merged
 
 def _resolve_runtime():
     env = os.environ.get("ENV", "").lower()
