@@ -27,14 +27,16 @@ RUN uv pip install --system --no-cache-dir \
 RUN uv pip install --system --no-cache-dir "numpy<2.0"
 
 # Install application dependencies
+# faster-whisper uses CTranslate2 for 4-8x speedup over openai-whisper
 # Pin huggingface_hub to version that supports use_auth_token for pyannote compatibility
 RUN uv pip install --system --no-cache-dir \
     "huggingface_hub<0.23.0" \
     runpod \
-    openai-whisper \
+    faster-whisper \
     pyannote.audio \
     librosa \
-    soundfile
+    soundfile \
+    requests
 
 # Copy handler
 COPY rp_handler.py /

@@ -1,22 +1,50 @@
 import base64
 import os
 import tempfile
+import time
 
 import requests as http_requests
 import runpod
 import torch
-import whisper
 import soundfile as sf
 import librosa
 
+from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
 from pyannote.core import Segment
 
 
-# Inlined from pyannote-whisper (repo install is broken)
-def diarize_text(transcribe_res, diarization_result):
+# ── Model loading at startup (once per worker, not per job) ──────────────
+
+def _resolve_runtime():
+    if torch.cuda.is_available():
+        print("CUDA detected. Using GPU execution.")
+        return "cuda", "large-v2", "float16"
+    print("No CUDA detected. Using CPU execution.")
+    return "cpu", "tiny", "int8"
+
+DEVICE, MODEL_SIZE, COMPUTE_TYPE = _resolve_runtime()
+
+print(f"Loading faster-whisper model '{MODEL_SIZE}' on '{DEVICE}' with {COMPUTE_TYPE}...")
+WHISPER_MODEL = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+print("Whisper model loaded.")
+
+print("Loading pyannote diarization pipeline...")
+DIARIZATION_PIPELINE = Pipeline.from_pretrained(
+    "pyannote/speaker-diarization-3.1",
+    use_auth_token=os.environ["HUGGINGFACE_ACCESS_TOKEN"]
+)
+if DEVICE == "cuda":
+    DIARIZATION_PIPELINE.to(torch.device("cuda"))
+print("Diarization pipeline loaded.")
+
+
+# ── Diarize text (inlined from pyannote-whisper) ────────────────────────
+
+def diarize_text(segments, diarization_result):
+    """Merge whisper segments with diarization speaker labels."""
     timestamp_texts = []
-    for item in transcribe_res['segments']:
+    for item in segments:
         timestamp_texts.append((Segment(item['start'], item['end']), item['text']))
 
     spk_text = []
@@ -48,64 +76,43 @@ def diarize_text(transcribe_res, diarization_result):
         merged.append((Segment(cache[0][0].start, cache[-1][0].end), cache[0][1], sentence))
     return merged
 
-def _resolve_runtime():
-    env = os.environ.get("ENV", "").lower()
-    if torch.cuda.is_available():
-        print("CUDA detected. Using GPU execution.")
-        return "cuda", "turbo"
 
-    if env == "prod":
-        print("WARNING: Production mode requested but CUDA not available. Falling back to CPU.")
-        return "cpu", "turbo"
-
-    print("No CUDA detected. Using CPU execution.")
-    return "cpu", "tiny"
-
+# ── Handler (called per job) ─────────────────────────────────────────────
 
 def handler(event):
-    print("Worker Start")
-    
+    job_start = time.time()
+    print("Job Start")
+
     # Validate event structure
     if not event or "input" not in event:
         raise ValueError("Event must contain 'input' field.")
-    
+
     request_input = event["input"]
 
     # Support two input modes: base64 or URL
     audio_url = request_input.get("audio_url")
     base64file = request_input.get("file")
     extension = request_input.get("ext", "wav")
+    language = request_input.get("language", None)
 
     if not audio_url and not base64file:
         raise ValueError("Either 'audio_url' or 'file' (base64) input is required.")
 
-    device, transcribe_model = _resolve_runtime()
-
-    # Load whisper model
-    print(f"Loading whisper model '{transcribe_model}' on device '{device}'...")
-    whisper_model = whisper.load_model(transcribe_model, device=device)
-
-    # Init pyannote pipeline
-    print("Loading pyannote pipeline...")
-    diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=os.environ["HUGGINGFACE_ACCESS_TOKEN"])
-
     # Get audio to a temporary file
     temp_file_path = None
     if audio_url:
-        # Download from URL
         print(f"Downloading audio from URL...")
+        t0 = time.time()
         response = http_requests.get(audio_url, stream=True, timeout=600)
         response.raise_for_status()
-        # Guess extension from URL if not provided
         if "." in audio_url.split("?")[0].split("/")[-1]:
             extension = audio_url.split("?")[0].split("/")[-1].split(".")[-1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as temp_file:
             for chunk in response.iter_content(chunk_size=8192):
                 temp_file.write(chunk)
             temp_file_path = temp_file.name
-        print(f"Downloaded to: {temp_file_path} ({os.path.getsize(temp_file_path) / (1024*1024):.1f} MB)")
+        print(f"Downloaded in {time.time()-t0:.1f}s: {temp_file_path} ({os.path.getsize(temp_file_path) / (1024*1024):.1f} MB)")
     else:
-        # Decode base64
         print("Decoding base64...")
         audio_data = base64.b64decode(base64file)
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as temp_file:
@@ -113,59 +120,73 @@ def handler(event):
             temp_file_path = temp_file.name
         print(f"Decoded file saved to: {temp_file_path}")
 
-    # Preprocess audio for pyannote: load and resample to ensure compatibility
+    # Preprocess audio for pyannote: load and resample to 16kHz
     print("Preprocessing audio for diarization...")
+    t0 = time.time()
     audio, original_sr = librosa.load(temp_file_path, sr=None)
-
-    # Resample to 16kHz which is standard for pyannote
     target_sr = 16000
     if original_sr != target_sr:
         print(f"Resampling audio from {original_sr}Hz to {target_sr}Hz...")
         audio = librosa.resample(audio, orig_sr=original_sr, target_sr=target_sr)
-    
-    # Save preprocessed audio as WAV for pyannote
     diarization_file_path = temp_file_path.replace(f".{extension}", "_diarization.wav")
     sf.write(diarization_file_path, audio, target_sr)
-    print(f"Preprocessed audio saved to: {diarization_file_path}")
+    print(f"Preprocessing done in {time.time()-t0:.1f}s")
 
-    # Transcribe (use original file, whisper handles various formats)
-    print("Transcribing...")
-    transcription_result = whisper_model.transcribe(temp_file_path)
+    # Transcribe with faster-whisper
+    print(f"Transcribing with faster-whisper (language={language})...")
+    t0 = time.time()
+    transcribe_kwargs = {"beam_size": 5, "vad_filter": True}
+    if language:
+        transcribe_kwargs["language"] = language
+    segments_iter, info = WHISPER_MODEL.transcribe(temp_file_path, **transcribe_kwargs)
 
-    # Run diarization pipeline (use preprocessed WAV file)
+    # Convert faster-whisper segments to dict format
+    segments_list = []
+    for seg in segments_iter:
+        segments_list.append({
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text
+        })
+    print(f"Transcription done in {time.time()-t0:.1f}s — {len(segments_list)} segments, detected language: {info.language} ({info.language_probability:.0%})")
+
+    # Build transcribe_res format for diarize_text
+    transcribe_res = {"segments": segments_list}
+
+    # Run diarization pipeline
     print("Running diarization pipeline...")
-    speaker_segments = diarization_pipeline(diarization_file_path)
+    t0 = time.time()
+    speaker_segments = DIARIZATION_PIPELINE(diarization_file_path)
+    print(f"Diarization done in {time.time()-t0:.1f}s")
 
-    # Print diarization results
     for turn, _, speaker in speaker_segments.itertracks(yield_label=True):
         print(f"Speaker {speaker}: {turn.start:.2f}s - {turn.end:.2f}s")
 
     # Merge transcription and diarization results
     print("Merging transcription and diarization results...")
-    merged_segments = diarize_text(transcription_result, speaker_segments)
+    merged_segments = diarize_text(transcribe_res, speaker_segments)
 
-    # Print merged segments
     for segment, speaker, text in merged_segments:
         print(f"{segment.start:.1f} - {segment.end:.1f}: Speaker_{speaker} {text}")
 
     # Cleanup files
     if temp_file_path and os.path.exists(temp_file_path):
         os.remove(temp_file_path)
-        print(f"Cleaned up temporary file: {temp_file_path}")
     if diarization_file_path and os.path.exists(diarization_file_path):
         os.remove(diarization_file_path)
-        print(f"Cleaned up diarization file: {diarization_file_path}")
 
-    # Map merged segments to a json
+    # Build output JSON
     merged_segments_json = []
     for segment, speaker, text in merged_segments:
-        trimmed_text = text.strip()
         merged_segments_json.append({
             "start": segment.start,
             "end": segment.end,
             "speaker": speaker,
-            "text": trimmed_text
+            "text": text.strip()
         })
+
+    total_time = time.time() - job_start
+    print(f"Job complete in {total_time:.1f}s ({total_time/60:.1f} min)")
 
     return merged_segments_json
 
