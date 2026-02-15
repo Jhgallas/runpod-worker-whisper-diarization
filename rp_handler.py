@@ -2,6 +2,7 @@ import base64
 import os
 import tempfile
 
+import requests as http_requests
 import runpod
 import torch
 import whisper
@@ -70,11 +71,13 @@ def handler(event):
     
     request_input = event["input"]
 
+    # Support two input modes: base64 or URL
+    audio_url = request_input.get("audio_url")
     base64file = request_input.get("file")
-    extension = request_input.get("ext")
+    extension = request_input.get("ext", "wav")
 
-    if not base64file or not extension:
-        raise ValueError("Both 'file' and 'ext' inputs are required.")
+    if not audio_url and not base64file:
+        raise ValueError("Either 'audio_url' or 'file' (base64) input is required.")
 
     device, transcribe_model = _resolve_runtime()
 
@@ -86,17 +89,29 @@ def handler(event):
     print("Loading pyannote pipeline...")
     diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=os.environ["HUGGINGFACE_ACCESS_TOKEN"])
 
-    # Decode base64 to binary data
-    print("Decoding base64...")
-    audio_data = base64.b64decode(base64file)
-
-    # Save to temporary file
-    print("Saving to local file...")
+    # Get audio to a temporary file
     temp_file_path = None
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as temp_file:
-        temp_file.write(audio_data)
-        temp_file_path = temp_file.name
-    print(f"Decoded file saved to: {temp_file_path}")
+    if audio_url:
+        # Download from URL
+        print(f"Downloading audio from URL...")
+        response = http_requests.get(audio_url, stream=True, timeout=600)
+        response.raise_for_status()
+        # Guess extension from URL if not provided
+        if "." in audio_url.split("?")[0].split("/")[-1]:
+            extension = audio_url.split("?")[0].split("/")[-1].split(".")[-1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as temp_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                temp_file.write(chunk)
+            temp_file_path = temp_file.name
+        print(f"Downloaded to: {temp_file_path} ({os.path.getsize(temp_file_path) / (1024*1024):.1f} MB)")
+    else:
+        # Decode base64
+        print("Decoding base64...")
+        audio_data = base64.b64decode(base64file)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{extension}") as temp_file:
+            temp_file.write(audio_data)
+            temp_file_path = temp_file.name
+        print(f"Decoded file saved to: {temp_file_path}")
 
     # Preprocess audio for pyannote: load and resample to ensure compatibility
     print("Preprocessing audio for diarization...")
