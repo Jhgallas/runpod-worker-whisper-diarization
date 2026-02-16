@@ -1,13 +1,12 @@
 import base64
 import os
+import subprocess
 import tempfile
 import time
 
 import requests as http_requests
 import runpod
 import torch
-import soundfile as sf
-import librosa
 
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
@@ -37,6 +36,20 @@ DIARIZATION_PIPELINE = Pipeline.from_pretrained(
 if DEVICE == "cuda":
     DIARIZATION_PIPELINE.to(torch.device("cuda"))
 print("Diarization pipeline loaded.")
+
+
+# ── Preprocessing with ffmpeg (no RAM loading) ──────────────────────────
+
+def preprocess_audio_ffmpeg(input_path, output_path):
+    """Convert any audio to 16kHz mono WAV using ffmpeg. Streams without loading into RAM."""
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+        output_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg preprocessing failed: {result.stderr[-300:]}")
 
 
 # ── Diarize text (inlined from pyannote-whisper) ────────────────────────
@@ -83,13 +96,11 @@ def handler(event):
     job_start = time.time()
     print("Job Start")
 
-    # Validate event structure
     if not event or "input" not in event:
         raise ValueError("Event must contain 'input' field.")
 
     request_input = event["input"]
 
-    # Support two input modes: base64 or URL
     audio_url = request_input.get("audio_url")
     base64file = request_input.get("file")
     extension = request_input.get("ext", "wav")
@@ -120,17 +131,12 @@ def handler(event):
             temp_file_path = temp_file.name
         print(f"Decoded file saved to: {temp_file_path}")
 
-    # Preprocess audio for pyannote: load and resample to 16kHz
-    print("Preprocessing audio for diarization...")
+    # Preprocess audio for pyannote using ffmpeg (streams, no RAM loading)
+    print("Preprocessing audio for diarization (ffmpeg)...")
     t0 = time.time()
-    audio, original_sr = librosa.load(temp_file_path, sr=None)
-    target_sr = 16000
-    if original_sr != target_sr:
-        print(f"Resampling audio from {original_sr}Hz to {target_sr}Hz...")
-        audio = librosa.resample(audio, orig_sr=original_sr, target_sr=target_sr)
     diarization_file_path = temp_file_path.replace(f".{extension}", "_diarization.wav")
-    sf.write(diarization_file_path, audio, target_sr)
-    print(f"Preprocessing done in {time.time()-t0:.1f}s")
+    preprocess_audio_ffmpeg(temp_file_path, diarization_file_path)
+    print(f"Preprocessing done in {time.time()-t0:.1f}s ({os.path.getsize(diarization_file_path) / (1024*1024):.1f} MB)")
 
     # Transcribe with faster-whisper
     print(f"Transcribing with faster-whisper (language={language})...")
@@ -156,15 +162,17 @@ def handler(event):
     speaker_segments = DIARIZATION_PIPELINE(diarization_file_path)
     print(f"Diarization done in {time.time()-t0:.1f}s")
 
-    for turn, _, speaker in speaker_segments.itertracks(yield_label=True):
-        print(f"Speaker {speaker}: {turn.start:.2f}s - {turn.end:.2f}s")
-
     # Merge transcription and diarization results
     print("Merging transcription and diarization results...")
+    t0 = time.time()
     merged_segments = diarize_text(segments_list, speaker_segments)
+    print(f"Merging done in {time.time()-t0:.1f}s — {len(merged_segments)} merged segments")
 
-    for segment, speaker, text in merged_segments:
-        print(f"{segment.start:.1f} - {segment.end:.1f}: Speaker_{speaker} {text}")
+    # Count unique speakers
+    speakers = set()
+    for _, spk, _ in merged_segments:
+        speakers.add(spk)
+    print(f"Speakers detected: {len(speakers)}")
 
     # Cleanup files
     if temp_file_path and os.path.exists(temp_file_path):
