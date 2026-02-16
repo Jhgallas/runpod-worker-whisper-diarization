@@ -105,6 +105,7 @@ def handler(event):
     base64file = request_input.get("file")
     extension = request_input.get("ext", "wav")
     language = request_input.get("language", None)
+    results_upload_url = request_input.get("results_upload_url", None)
 
     if not audio_url and not base64file:
         raise ValueError("Either 'audio_url' or 'file' (base64) input is required.")
@@ -192,6 +193,23 @@ def handler(event):
 
     total_time = time.time() - job_start
     print(f"Job complete in {total_time:.1f}s ({total_time/60:.1f} min)")
+
+    # Upload results to GCS if a signed upload URL was provided
+    if results_upload_url:
+        print("Uploading results to GCS...")
+        try:
+            import json
+            results_json = json.dumps(merged_segments_json, indent=2)
+            upload_resp = http_requests.put(
+                results_upload_url,
+                data=results_json,
+                headers={"Content-Type": "application/json"},
+                timeout=60
+            )
+            upload_resp.raise_for_status()
+            print(f"Results uploaded to GCS ({len(results_json)} bytes)")
+        except Exception as e:
+            print(f"WARNING: Failed to upload results to GCS: {e}")
 
     return merged_segments_json
 
