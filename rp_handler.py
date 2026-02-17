@@ -141,29 +141,37 @@ def handler(event):
     preprocess_audio_ffmpeg(temp_file_path, diarization_file_path)
     print(f"Preprocessing done in {time.time()-t0:.1f}s ({os.path.getsize(diarization_file_path) / (1024*1024):.1f} MB)")
 
-    # Transcribe with faster-whisper
-    print(f"Transcribing with faster-whisper (language={language})...")
-    t0 = time.time()
-    transcribe_kwargs = {"beam_size": 5, "vad_filter": True}
+    # Run transcription and diarization in parallel (independent until merge)
+    import concurrent.futures
+
+    transcribe_kwargs = {
+        "beam_size": 1,                      # greedy decoding — ~2-3x faster, negligible quality loss
+        "vad_filter": True,                   # skip silence
+        "condition_on_previous_text": False,  # prevents hallucination cascading on long audio
+    }
     if language:
         transcribe_kwargs["language"] = language
-    segments_iter, info = WHISPER_MODEL.transcribe(temp_file_path, **transcribe_kwargs)
 
-    # Convert faster-whisper segments to dict format
-    segments_list = []
-    for seg in segments_iter:
-        segments_list.append({
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text
-        })
-    print(f"Transcription done in {time.time()-t0:.1f}s — {len(segments_list)} segments, detected language: {info.language} ({info.language_probability:.0%})")
+    def do_transcription():
+        print(f"Transcribing with faster-whisper (language={language})...")
+        t0 = time.time()
+        segs_iter, inf = WHISPER_MODEL.transcribe(temp_file_path, **transcribe_kwargs)
+        segs = [{"start": s.start, "end": s.end, "text": s.text} for s in segs_iter]
+        print(f"Transcription done in {time.time()-t0:.1f}s — {len(segs)} segments, detected language: {inf.language} ({inf.language_probability:.0%})")
+        return segs, inf
 
-    # Run diarization pipeline
-    print("Running diarization pipeline...")
-    t0 = time.time()
-    speaker_segments = DIARIZATION_PIPELINE(diarization_file_path)
-    print(f"Diarization done in {time.time()-t0:.1f}s")
+    def do_diarization():
+        print("Running diarization pipeline...")
+        t0 = time.time()
+        result = DIARIZATION_PIPELINE(diarization_file_path)
+        print(f"Diarization done in {time.time()-t0:.1f}s")
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        trans_future = executor.submit(do_transcription)
+        diar_future = executor.submit(do_diarization)
+        segments_list, info = trans_future.result()
+        speaker_segments = diar_future.result()
 
     # Merge transcription and diarization results
     print("Merging transcription and diarization results...")
