@@ -30,7 +30,6 @@ RUN uv pip install --system --no-cache-dir "numpy<2.0"
 # pyannote.audio 4.0+ uses community-1 model with VBx clustering (faster + more accurate)
 RUN uv pip install --system --no-cache-dir \
     "pyannote.audio>=4.0" \
-    "torchcodec>=0.7" \
     runpod \
     faster-whisper \
     librosa \

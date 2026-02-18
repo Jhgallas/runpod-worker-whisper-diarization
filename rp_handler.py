@@ -7,6 +7,7 @@ import time
 import requests as http_requests
 import runpod
 import torch
+import torchaudio
 
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
@@ -163,7 +164,10 @@ def handler(event):
     def do_diarization():
         print("Running diarization pipeline...")
         t0 = time.time()
-        result = DIARIZATION_PIPELINE(diarization_file_path)
+        # Preload audio with torchaudio to bypass torchcodec dependency
+        waveform, sample_rate = torchaudio.load(diarization_file_path)
+        audio_input = {"waveform": waveform, "sample_rate": sample_rate}
+        result = DIARIZATION_PIPELINE(audio_input)
         # pyannote 4.0+ returns DiarizeOutput; extract the Annotation for merging
         if hasattr(result, 'speaker_diarization'):
             result = result.speaker_diarization
