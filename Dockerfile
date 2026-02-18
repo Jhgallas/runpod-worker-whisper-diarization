@@ -19,21 +19,20 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
-# Install PyTorch 2.4.1 with CUDA 12.4 support
+# Install PyTorch 2.8.0 with CUDA 12.4 support (required by pyannote.audio 4.0)
 RUN uv pip install --system --no-cache-dir \
-    torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124
+    torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu124
 
 # Pin numpy<2.0 for pyannote.audio compatibility
 RUN uv pip install --system --no-cache-dir "numpy<2.0"
 
 # Install application dependencies
-# faster-whisper uses CTranslate2 for 4-8x speedup over openai-whisper
-# Pin huggingface_hub to version that supports use_auth_token for pyannote compatibility
+# pyannote.audio 4.0+ uses community-1 model with VBx clustering (faster + more accurate)
+# Install pyannote first (it pins torch==2.8.0), then faster-whisper on top
 RUN uv pip install --system --no-cache-dir \
-    "huggingface_hub<0.23.0" \
+    "pyannote.audio>=4.0" \
     runpod \
     faster-whisper \
-    pyannote.audio \
     librosa \
     soundfile \
     requests

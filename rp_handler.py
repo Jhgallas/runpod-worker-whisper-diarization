@@ -32,8 +32,8 @@ print("Whisper model loaded.")
 
 print("Loading pyannote diarization pipeline...")
 DIARIZATION_PIPELINE = Pipeline.from_pretrained(
-    "pyannote/speaker-diarization-3.1",
-    use_auth_token=os.environ["HUGGINGFACE_ACCESS_TOKEN"]
+    "pyannote/speaker-diarization-community-1",
+    token=os.environ["HUGGINGFACE_ACCESS_TOKEN"]
 )
 if DEVICE == "cuda":
     DIARIZATION_PIPELINE.to(torch.device("cuda"))
@@ -164,6 +164,9 @@ def handler(event):
         print("Running diarization pipeline...")
         t0 = time.time()
         result = DIARIZATION_PIPELINE(diarization_file_path)
+        # pyannote 4.0+ returns DiarizeOutput; extract the Annotation for merging
+        if hasattr(result, 'speaker_diarization'):
+            result = result.speaker_diarization
         print(f"Diarization done in {time.time()-t0:.1f}s")
         return result
 
