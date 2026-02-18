@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
 WORKDIR /
 
@@ -19,16 +19,15 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
-# Install PyTorch 2.8.0 with CUDA 12.4 support (required by pyannote.audio 4.0)
+# Install PyTorch 2.8.0 with CUDA 12.6 support (required by pyannote.audio 4.0)
 RUN uv pip install --system --no-cache-dir \
-    torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu124
+    torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
 
 # Pin numpy<2.0 for pyannote.audio compatibility
 RUN uv pip install --system --no-cache-dir "numpy<2.0"
 
 # Install application dependencies
 # pyannote.audio 4.0+ uses community-1 model with VBx clustering (faster + more accurate)
-# Install pyannote first (it pins torch==2.8.0), then faster-whisper on top
 RUN uv pip install --system --no-cache-dir \
     "pyannote.audio>=4.0" \
     runpod \
